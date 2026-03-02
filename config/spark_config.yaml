@@ -1,0 +1,66 @@
+###############################################################################
+# spark_config.yaml — Centralized Spark tuning for every notebook / script
+# Module: 7006SCN  |  Fake News Detection  |  Common Crawl
+#
+# Loaded by config/spark_session.py → guarantees identical config everywhere.
+###############################################################################
+
+# ── Session identity ─────────────────────────────────────────────────────────
+app_name: "FakeNewsDetection-CC"
+
+# ── Memory & execution ───────────────────────────────────────────────────────
+spark_config:
+  # Driver — the notebook/script process itself
+  spark.driver.memory: "4g"              # Sufficient for local; raise on cluster
+  spark.driver.maxResultSize: "2g"       # Caps collect() to prevent OOM
+
+  # Executors — the worker JVMs that do the heavy lifting
+  spark.executor.memory: "4g"            # Per-executor heap; tune to node RAM
+  spark.executor.cores: "2"              # 2 cores/executor → good task-level //
+  spark.executor.instances: "2"          # Default 2; scalability expts override
+
+  # ── Shuffle tuning ────────────────────────────────────────────────────────
+  spark.sql.shuffle.partitions: "200"    # Default 200; set to 2× total cores
+  spark.shuffle.compress: "true"         # LZ4 compress shuffle files
+  spark.shuffle.spill.compress: "true"   # Compress spill-to-disk
+
+  # ── Broadcast join threshold ───────────────────────────────────────────────
+  spark.sql.autoBroadcastJoinThreshold: "52428800"   # 50 MB — avoids shuffle
+  #   WHY: label lookup tables & stop-word lists are < 50 MB → broadcast them
+  #         instead of triggering a SortMergeJoin with full data shuffle.
+
+  # ── Arrow / Pandas interop ────────────────────────────────────────────────
+  spark.sql.execution.arrow.pyspark.enabled: "true"  # 10-100× for toPandas()
+  spark.sql.execution.arrow.pyspark.fallback.enabled: "true"
+
+  # ── Parquet / data format ──────────────────────────────────────────────────
+  spark.sql.parquet.compression.codec: "snappy"      # Fast decompress
+  spark.sql.parquet.mergeSchema: "false"              # Avoid slow schema merge
+
+  # ── Adaptive Query Execution (AQE) ────────────────────────────────────────
+  spark.sql.adaptive.enabled: "true"                  # Runtime re-optimization
+  spark.sql.adaptive.coalescePartitions.enabled: "true"
+  spark.sql.adaptive.skewJoin.enabled: "true"         # Auto-handle skew
+
+  # ── S3 / Common Crawl access ──────────────────────────────────────────────
+  spark.hadoop.fs.s3a.impl: "org.apache.hadoop.fs.s3a.S3AFileSystem"
+  spark.hadoop.fs.s3a.aws.credentials.provider: "org.apache.hadoop.fs.s3a.AnonymousAWSCredentialsProvider"
+  #   Common Crawl is a public bucket → anonymous access, no keys needed.
+
+  # ── Speculation (cluster mode) ────────────────────────────────────────────
+  spark.speculation: "false"             # Disable locally; enable on cluster
+
+# ── Scaling experiment overrides ─────────────────────────────────────────────
+scaling_profiles:
+  single:
+    spark.executor.instances: "1"
+    spark.executor.cores: "2"
+    spark.executor.memory: "4g"
+  dual:
+    spark.executor.instances: "2"
+    spark.executor.cores: "2"
+    spark.executor.memory: "4g"
+  quad:
+    spark.executor.instances: "4"
+    spark.executor.cores: "2"
+    spark.executor.memory: "4g"

@@ -1,0 +1,42 @@
+# Fake News Detection — Common Crawl
+# Never commit credentials
+.env
+*.pem
+
+# Data artefacts
+data/raw/
+data/processed/
+data/parquet/
+*.warc.gz
+*.wet.gz
+
+# Spark / JVM
+metastore_db/
+spark-warehouse/
+derby.log
+*.jar
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
+
+# Models (large)
+models/
+*.pkl
+*.model/

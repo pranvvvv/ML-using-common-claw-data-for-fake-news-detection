@@ -1,0 +1,4 @@
+model,accuracy,f1,precision,recall,auc
+LogisticRegression,1.0,1.0,1.0,1.0,1.0
+LinearSVC,1.0,1.0,1.0,1.0,1.0
+RandomForest,1.0,1.0,1.0,1.0,1.0

@@ -1,0 +1,4 @@
+model,TP,FP,FN,TN
+LogisticRegression,3196,198,162,2843
+LinearSVC,3153,212,205,2829
+RandomForest,3180,269,178,2772

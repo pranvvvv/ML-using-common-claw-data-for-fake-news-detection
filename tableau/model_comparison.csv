@@ -1,4 +1,4 @@
-model,accuracy,f1,auc,train_time_s
-LogisticRegression,1.0,1.0,1.0,71.8
-LinearSVC,1.0,1.0,1.0,155.0
-RandomForest,1.0,1.0,1.0,44.1
+model,accuracy,f1,precision,recall,auc,train_time_s
+LogisticRegression,0.9401,0.9401,0.9402,0.9401,0.9447,337.9
+LinearSVC,0.9351,0.9351,0.9351,0.9351,0.9459,382.2
+RandomForest,0.9296,0.9295,0.93,0.9296,0.9464,1117.0

@@ -1,5 +1,8 @@
-data_fraction,num_rows,train_time_s
-0.25,7834,5.2
-0.5,15665,2.85
-0.75,23422,2.77
-1.0,31030,2.61
+experiment,variable,value,train_time_s
+weak_scaling,25% data,7833.0,7.11
+weak_scaling,50% data,15643.0,31.63
+weak_scaling,75% data,23431.0,2.9
+weak_scaling,100% data,31041.0,2.9
+strong_scaling,1.0 cores,1.0,1.27
+strong_scaling,2.0 cores,2.0,2.0
+strong_scaling,4.0 cores,4.0,2.66

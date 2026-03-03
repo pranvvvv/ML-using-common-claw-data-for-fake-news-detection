@@ -1,0 +1,4 @@
+model,accuracy,f1,train_time_s,vectorization_time_s
+sklearn_LR,0.9445,0.9467,0.46,2.24
+sklearn_SVC,0.9445,0.9466,1.59,2.24
+sklearn_RF,0.9296,0.9332,2.61,2.24

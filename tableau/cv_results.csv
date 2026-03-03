@@ -1,0 +1,4 @@
+Model,Avg_F1,Std_F1,Avg_AUC,Std_AUC
+LogisticRegression,0.9394,0.0005,0.9448,0.0004
+LinearSVC,0.9342,0.0002,0.9451,0.0003
+RandomForest,0.9309,0.0006,0.9466,0.0003

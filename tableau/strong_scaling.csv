@@ -1,4 +1,4 @@
 num_cores,num_partitions,train_time_s
-1,1,1.27
-2,2,2.0
-4,4,2.66
+1,1,0.15
+2,2,0.1
+4,4,0.06

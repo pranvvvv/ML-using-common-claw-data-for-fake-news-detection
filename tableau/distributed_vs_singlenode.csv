@@ -1,4 +1,5 @@
 Algorithm,Spark_Acc,Spark_F1,Spark_Time_s,sklearn_Acc,sklearn_F1,sklearn_Time_s
-LogisticRegression,0.9437,0.9437,337.9,0.9445,0.9467,0.46
-LinearSVC,0.9348,0.9348,382.2,0.9445,0.9466,1.59
-RandomForest,0.9301,0.9301,1117.0,0.9296,0.9332,2.61
+LogisticRegression,0.94,0.9422,0.2,0.94,0.9422,0.31
+LinearSVC,0.9409,0.9431,2.1,0.9409,0.9431,2.84
+RandomForest,0.9274,0.931,2.5,0.9253,0.9291,1.56
+NaiveBayes,0.93,0.9326,0.0,0.93,0.9326,0.02

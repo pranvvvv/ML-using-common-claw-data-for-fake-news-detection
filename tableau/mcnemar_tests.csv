@@ -1,0 +1,7 @@
+model_1,model_2,b_correct1_wrong2,c_wrong1_correct2,chi2,p_value,significant_005
+LogisticRegression,LinearSVC,14,20,0.7353,0.391173,False
+LogisticRegression,RandomForest,113,30,47.021,0.0,True
+LogisticRegression,NaiveBayes,82,16,43.1122,0.0,True
+LinearSVC,RandomForest,118,29,52.6803,0.0,True
+LinearSVC,NaiveBayes,91,19,45.8273,0.0,True
+RandomForest,NaiveBayes,57,74,1.9542,0.162135,False

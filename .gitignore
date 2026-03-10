@@ -14,7 +14,12 @@ data/parquet/
 metastore_db/
 spark-warehouse/
 derby.log
+hs_err_pid*.log
 *.jar
+
+# Virtual environment
+.venv/
+venv/
 
 # Python
 __pycache__/

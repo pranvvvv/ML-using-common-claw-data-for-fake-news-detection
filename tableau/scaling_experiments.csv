@@ -1,8 +1,8 @@
 experiment,variable,value,train_time_s
-weak_scaling,25% data,7833.0,7.11
-weak_scaling,50% data,15643.0,31.63
-weak_scaling,75% data,23431.0,2.9
-weak_scaling,100% data,31041.0,2.9
-strong_scaling,1.0 cores,1.0,1.27
-strong_scaling,2.0 cores,2.0,2.0
-strong_scaling,4.0 cores,4.0,2.66
+weak_scaling,25% data,7704.0,0.05
+weak_scaling,50% data,15408.0,0.05
+weak_scaling,75% data,23112.0,0.12
+weak_scaling,100% data,30817.0,0.14
+strong_scaling,1 cores,1.0,0.15
+strong_scaling,2 cores,2.0,0.1
+strong_scaling,4 cores,4.0,0.06

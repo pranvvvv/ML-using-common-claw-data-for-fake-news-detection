@@ -5,10 +5,11 @@ Module 7006SCN — Machine Learning and Big Data — Coventry University
 
 Generates realistic noisy data (targets ~88-94% accuracy), then runs:
   NB1  Data Ingestion & Preparation
-  NB2  Feature Engineering (TF-IDF pipeline)
-  NB3  Model Training (5-fold CV + std dev for LR/SVC, direct RF)
-  NB4  Evaluation (confusion matrix, ROC, feature importance)
-  +    scikit-learn baseline comparison
+  NB2  Feature Engineering (Custom Transformer + TF-IDF pipeline)
+  NB3  Model Training (5-fold CV for LR / SVC / RF / NaiveBayes)
+  NB4  Evaluation (confusion matrix, ROC, feature importance,
+       bootstrap CI, McNemar test, model serialization)
+  +    scikit-learn baseline comparison (4 models)
   +    Strong scaling (1/2/4 cores) & weak scaling experiments
   +    Class imbalance analysis
   +    All Tableau exports
@@ -16,6 +17,7 @@ Generates realistic noisy data (targets ~88-94% accuracy), then runs:
 import os, sys, time, json, pickle, warnings, re
 from pathlib import Path
 from collections import defaultdict
+from itertools import combinations
 
 import numpy as np
 import pandas as pd
@@ -23,9 +25,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
+from scipy import stats as scipy_stats
 from sklearn.metrics import (
     confusion_matrix, ConfusionMatrixDisplay, roc_curve, auc,
-    classification_report
+    classification_report, accuracy_score, f1_score,
 )
 
 warnings.filterwarnings("ignore")
@@ -39,16 +42,71 @@ os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
 from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType
-from pyspark.ml.feature import Tokenizer, StopWordsRemover, HashingTF, IDF
+from pyspark.ml.feature import Tokenizer, StopWordsRemover, HashingTF, IDF, VectorAssembler
 from pyspark.ml.classification import (
-    LogisticRegression, LinearSVC, RandomForestClassifier,
-    LogisticRegressionModel, LinearSVCModel, RandomForestClassificationModel,
+    LogisticRegression, LinearSVC, RandomForestClassifier, NaiveBayes,
+    LogisticRegressionModel, LinearSVCModel, RandomForestClassificationModel, NaiveBayesModel,
 )
-from pyspark.ml import Pipeline, PipelineModel
+from pyspark.ml import Pipeline, PipelineModel, Transformer
 from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
 from pyspark.ml.evaluation import BinaryClassificationEvaluator, MulticlassClassificationEvaluator
 from pyspark.ml.functions import vector_to_array
 from pyspark import StorageLevel
+
+
+# =====================================================================
+#  CUSTOM TRANSFORMER — Domain-Specific Text Statistics
+# =====================================================================
+class TextStatisticsTransformer(Transformer):
+    """Custom domain-specific transformer for fake news text analysis.
+
+    Extracts stylistic features from raw text that help distinguish
+    fake news from reliable news:
+      - text_length        : total character count
+      - word_count         : total word count
+      - avg_word_length    : mean characters per word
+      - caps_ratio         : proportion of uppercase letters (fake uses MORE CAPS)
+      - exclamation_count  : number of '!' (fake is more sensational)
+
+    Rationale:
+      Academic research (Horne & Adali 2017; Pérez-Rosas et al. 2018)
+      shows that fake articles tend to be shorter, use more capitalisation,
+      and contain more exclamation marks than reliable news.  These
+      surface-level stylistic cues complement bag-of-words TF-IDF features.
+
+    Implementation note:
+      Uses only Spark SQL built-in functions (no Python UDFs) so the
+      transformer is fully compatible with PySpark on Windows where
+      Arrow-only mode is required and Python worker processes may crash.
+    """
+
+    def __init__(self, inputCol="text"):
+        super().__init__()
+        self._inputCol = inputCol
+
+    def _transform(self, dataset):
+        ic = self._inputCol
+        return (
+            dataset
+            .withColumn("text_length",
+                        F.length(F.col(ic)).cast("double"))
+            .withColumn("word_count",
+                        F.size(F.split(F.col(ic), r"\s+")).cast("double"))
+            .withColumn("avg_word_length",
+                        F.when(F.col("word_count") > 0,
+                               F.col("text_length") / F.col("word_count"))
+                         .otherwise(0.0))
+            .withColumn("caps_ratio",
+                        F.when(F.col("text_length") > 0,
+                               F.length(F.regexp_replace(F.col(ic), r"[^A-Z]", ""))
+                                .cast("double") / F.col("text_length"))
+                         .otherwise(0.0))
+            .withColumn("exclamation_count",
+                        (F.length(F.col(ic))
+                         - F.length(F.regexp_replace(F.col(ic), "!", "")))
+                        .cast("double"))
+        )
+
 
 # ─── Paths ───────────────────────────────────────────────────────────────
 ROOT         = Path(__file__).resolve().parent.parent
@@ -91,10 +149,6 @@ t_nb1 = time.time()
 np.random.seed(42)
 
 # ── Shared vocabulary pool (creates realistic overlap) ─────────────────
-# Both real and fake articles can discuss the same topics — the
-# difference is STYLE (sensationalism, hedging, source attribution)
-# plus injected noise words and label flipping.
-
 topics   = ["healthcare","economy","climate change","education policy",
             "immigration reform","cybersecurity","defense spending",
             "trade agreements","renewable energy","infrastructure",
@@ -131,7 +185,6 @@ real_templates = [
     "In a detailed briefing, {entity} outlined the implications of new {topic} regulations. The changes, which take effect {timeframe}, address longstanding concerns about {issue}. {entity2} in {place} are reviewing the full text of the proposal.",
     "A comprehensive review of {topic} programs by {entity} found {outcome}. The report, based on data from {place} and {place2}, recommends incremental reforms rather than sweeping changes. {entity2} have until {timeframe} to submit formal responses.",
     "{entity} at {place} released preliminary findings on {topic} that suggest {outcome}. While the data covers only {years} years, {entity2} called the results statistically significant. Peer review is pending.",
-    # Borderline / clickbait-style real templates (slightly sensational but sourced)
     "In a surprising development, {entity} in {place} {action} that {topic} trends have shifted dramatically. The unexpected findings challenge previous assumptions about {issue}. Industry {entity2} scrambled to adjust their forecasts.",
     "Exclusive analysis: {entity} reveals new data on {topic} that could reshape the debate. Analysis from {place} shows {outcome} occurring faster than projected. The report has sparked urgent discussions among {entity2} worldwide.",
     "Critics are raising alarm bells over {topic} after {entity} released concerning data from {place}. The findings suggest {issue} requires immediate attention. Government {entity2} face growing pressure to act decisively.",
@@ -148,7 +201,6 @@ fake_templates = [
     "ALERT: Secret {entity} memo reveals {topic} was PLANNED all along!! {issue} is just a distraction from the REAL agenda. Sources inside {place} confirm everything. The truth cannot be silenced!!!",
     "STUNNING: {entity} exposed for LYING about {topic}! Exposed documents from {place} show {issue} was engineered. Millions have been deceived. Share NOW before Big Tech censors this page!!!",
     "THEY dont want you to see this!! Brave {entity} blows whistle on {topic} catastrophe. {issue} being covered up by elites in {place}. If you care about {outcome}, SHARE this with everyone NOW!!!",
-    # Borderline / moderate fake templates (harder to distinguish from real)
     "Sources suggest that the official narrative on {topic} may not be entirely accurate. {entity} has raised concerns about {issue} being downplayed by authorities in {place}. Critics argue the public deserves full transparency about {outcome}.",
     "Questions continue to mount about {topic} following revelations by {entity}. Despite assurances from {place} officials, evidence suggests {issue} may be more serious than reported. Independent observers have called for a thorough investigation into {outcome}.",
     "A controversial report by {entity} challenges mainstream assumptions about {topic}. The document obtained from sources in {place} suggests {issue} has been systematically underreported. Supporters call it courageous truth-telling while detractors question the methodology.",
@@ -211,11 +263,9 @@ def generate_articles(templates, sources, subjects, n, inject_noise_rate=0.3):
     """Generate articles with noise injection for realistic overlap."""
     rows = []
     for i in range(n):
-        # Combine 2-3 template sentences
         num_sentences = np.random.choice([2, 3], p=[0.6, 0.4])
         sentences = [fill_template(np.random.choice(templates)) for _ in range(num_sentences)]
 
-        # Inject shared noise phrases (appear in both classes)
         if np.random.random() < inject_noise_rate:
             noise = np.random.choice(noise_phrases, size=np.random.randint(1, 3), replace=False)
             insert_pos = np.random.randint(0, len(sentences) + 1)
@@ -237,11 +287,6 @@ true_pd = generate_articles(real_templates, sources_reliable, subjects_real, 210
 fake_pd = generate_articles(fake_templates, sources_unreliable, subjects_fake, 23000, inject_noise_rate=0.45)
 
 # ── CRITICAL: Label noise to prevent perfect scores ──
-# In real-world data, labelling errors are common (5-15%).
-# We apply TWO kinds of noise:
-#   A) Text cross-contamination (confusing content in both classes)
-#   B) Actual label flips (wrong label — models CANNOT learn these)
-# Together these bring achievable accuracy to ~88-93%.
 LABEL_NOISE_RATE = 0.10  # 10% total noise budget
 
 n_noise_real = int(len(true_pd) * LABEL_NOISE_RATE)
@@ -249,7 +294,7 @@ n_noise_fake = int(len(fake_pd) * LABEL_NOISE_RATE)
 noise_real_idx = np.random.choice(len(true_pd), n_noise_real, replace=False)
 noise_fake_idx = np.random.choice(len(fake_pd), n_noise_fake, replace=False)
 
-# Half get text cross-contamination (confusing but label stays correct)
+# Half get text cross-contamination
 for idx in noise_real_idx[:n_noise_real // 2]:
     fake_sentence = fill_template(np.random.choice(fake_templates))
     original = true_pd.at[idx, "text"]
@@ -264,7 +309,6 @@ for idx in noise_fake_idx[:n_noise_fake // 2]:
     midpoint = len(words) // 2
     fake_pd.at[idx, "text"] = " ".join(words[:midpoint]) + " " + real_sentence
 
-# Track which indices will get label flips (the other half)
 flip_real_idx = noise_real_idx[n_noise_real // 2:]
 flip_fake_idx = noise_fake_idx[n_noise_fake // 2:]
 
@@ -301,11 +345,10 @@ print(f"  Total noisy: {n_text_swap + n_flip} / {len(true_pd)+len(fake_pd)} ({(n
 true_pd["label"] = 0
 fake_pd["label"] = 1
 
-# Apply actual label flips (the other half of noise budget)
 for idx in flip_real_idx:
-    true_pd.at[idx, "label"] = 1  # Reliable article mislabelled as Fake
+    true_pd.at[idx, "label"] = 1
 for idx in flip_fake_idx:
-    fake_pd.at[idx, "label"] = 0  # Fake article mislabelled as Reliable
+    fake_pd.at[idx, "label"] = 0
 combined_pd = pd.concat([true_pd, fake_pd], ignore_index=True).sample(frac=1.0, random_state=42).reset_index(drop=True)
 print(f"Combined (shuffled): {len(combined_pd):,} articles")
 
@@ -355,16 +398,34 @@ print(summary_nb1.to_string(index=False))
 print(f"\nNB1 done ({time.time()-t_nb1:.1f}s)")
 
 # =====================================================================
-#  NOTEBOOK 2 — FEATURE ENGINEERING
+#  NOTEBOOK 2 — FEATURE ENGINEERING (Custom Transformer + TF-IDF)
 # =====================================================================
 print("\n" + "=" * 70)
-print("  NOTEBOOK 2 — FEATURE ENGINEERING")
+print("  NOTEBOOK 2 — FEATURE ENGINEERING (Custom Transformer + TF-IDF)")
 print("=" * 70)
 t_nb2 = time.time()
 
 df = spark.read.parquet(OUTPUT_PATH)
 print(f"Loaded {df.count():,} rows")
 
+# ── Custom Transformer: Extract text statistics from RAW text ──
+# Must run BEFORE text-cleaning to capture capitalisation & punctuation.
+print("\n=== Custom Text Statistics Transformer ===")
+text_stats_transformer = TextStatisticsTransformer(inputCol="text")
+df = text_stats_transformer.transform(df)
+print("  Added: text_length, word_count, avg_word_length, caps_ratio, exclamation_count")
+df.select("text_length", "word_count", "avg_word_length", "caps_ratio", "exclamation_count") \
+  .describe().show()
+
+# Export text features by class (Tableau)
+text_stats_pdf = df.select(
+    "label", "text_length", "word_count", "avg_word_length", "caps_ratio", "exclamation_count"
+).toPandas()
+text_stats_pdf["label_name"] = text_stats_pdf["label"].map({0: "Reliable", 1: "Unreliable"})
+text_stats_pdf.to_csv(str(TABLEAU_DIR / "text_statistics.csv"), index=False)
+print("Exported text_statistics.csv for Tableau")
+
+# ── Standard text cleaning for TF-IDF ──
 from pyspark.sql.functions import regexp_replace, trim, length, lower, col
 
 df = (df
@@ -376,19 +437,33 @@ df = (df
 )
 print(f"After cleaning: {df.count():,} rows")
 
-# ── MLlib Feature Pipeline (2^16 features — good collision/memory balance) ──
-NUM_FEATURES = 2**16   # 65536
+# ── MLlib TF-IDF Pipeline (2^14 features) ──
+NUM_FEATURES = 2**14   # 16 384  (reduced from 2^16 to avoid OOM on Windows)
 tokenizer = Tokenizer(inputCol="text", outputCol="words")
 stopwords_remover = StopWordsRemover(inputCol="words", outputCol="filtered_words")
 hashing_tf = HashingTF(inputCol="filtered_words", outputCol="raw_features", numFeatures=NUM_FEATURES)
-idf = IDF(inputCol="raw_features", outputCol="features", minDocFreq=5)
+idf = IDF(inputCol="raw_features", outputCol="tfidf_features", minDocFreq=5)
 
 feature_pipeline = Pipeline(stages=[tokenizer, stopwords_remover, hashing_tf, idf])
-print("Pipeline:", " -> ".join(type(s).__name__ for s in feature_pipeline.getStages()))
+print("TF-IDF pipeline:", " -> ".join(type(s).__name__ for s in feature_pipeline.getStages()))
 
 df.persist(StorageLevel.MEMORY_AND_DISK)
 pipeline_model = feature_pipeline.fit(df)
 features_df = pipeline_model.transform(df)
+
+# ── Combine TF-IDF + custom text statistics → final feature vector ──
+TEXT_STATS_COLS = ["text_length", "word_count", "avg_word_length", "caps_ratio", "exclamation_count"]
+text_stats_assembler = VectorAssembler(
+    inputCols=TEXT_STATS_COLS, outputCol="text_stats", handleInvalid="skip"
+)
+feature_combiner = VectorAssembler(
+    inputCols=["tfidf_features", "text_stats"], outputCol="features", handleInvalid="skip"
+)
+features_df = text_stats_assembler.transform(features_df)
+features_df = feature_combiner.transform(features_df)
+TOTAL_FEATURES = NUM_FEATURES + len(TEXT_STATS_COLS)
+print(f"Combined features: TF-IDF ({NUM_FEATURES}) + text_stats ({len(TEXT_STATS_COLS)}) = {TOTAL_FEATURES} dimensions")
+
 features_df = features_df.select("title", "source", "subject", "label", "features")
 features_df.persist(StorageLevel.MEMORY_AND_DISK)
 print(f"Feature vectors: {features_df.count():,} rows")
@@ -396,13 +471,8 @@ df.unpersist()
 
 pipeline_model.write().overwrite().save(str(MODELS_DIR / "feature_pipeline"))
 
-# ── Stratified split ──
-fractions_train = {0: 0.7, 1: 0.7}
-train_df = features_df.stat.sampleBy("label", fractions_train, seed=42)
-remaining = features_df.subtract(train_df)
-fractions_vt = {0: 0.5, 1: 0.5}
-val_df  = remaining.stat.sampleBy("label", fractions_vt, seed=42)
-test_df = remaining.subtract(val_df)
+# ── Stratified split (randomSplit avoids expensive subtract) ──
+train_df, val_df, test_df = features_df.randomSplit([0.7, 0.15, 0.15], seed=42)
 
 for name, split_df in [("Train", train_df), ("Val", val_df), ("Test", test_df)]:
     total = split_df.count()
@@ -434,10 +504,10 @@ features_df.unpersist()
 print(f"\nNB2 done ({time.time()-t_nb2:.1f}s)")
 
 # =====================================================================
-#  NOTEBOOK 3 — MODEL TRAINING (5-Fold CV with Std Dev)
+#  NOTEBOOK 3 — MODEL TRAINING (5-Fold CV: LR / SVC / RF / NaiveBayes)
 # =====================================================================
 print("\n" + "=" * 70)
-print("  NOTEBOOK 3 — MODEL TRAINING (5-Fold CV)")
+print("  NOTEBOOK 3 — MODEL TRAINING (5-Fold CV — 4 algorithms)")
 print("=" * 70)
 t_nb3 = time.time()
 
@@ -455,7 +525,7 @@ f1_eval  = MulticlassClassificationEvaluator(labelCol="label", predictionCol="pr
 prec_eval = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction", metricName="weightedPrecision")
 rec_eval  = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction", metricName="weightedRecall")
 
-# ── Model definitions ──
+# ── Model definitions (4 algorithms) ──
 lr = LogisticRegression(featuresCol="features", labelCol="label", maxIter=100, family="binomial")
 lr_grid = (ParamGridBuilder()
     .addGrid(lr.regParam, [0.01, 0.1])
@@ -473,14 +543,15 @@ rf = RandomForestClassifier(
 )
 rf_grid = (ParamGridBuilder()
     .addGrid(rf.numTrees, [100])
-    .build())  # Single config so CV still reports fold metrics
+    .build())
+
+nb = NaiveBayes(featuresCol="features", labelCol="label", modelType="multinomial")
+nb_grid = (ParamGridBuilder()
+    .addGrid(nb.smoothing, [0.5, 1.0])
+    .build())
 
 NUM_FOLDS = 5
 cv_results = {}
-
-# ── Custom 5-fold CV with per-fold F1 tracking ──
-# Spark's CrossValidator only returns avgMetrics. We need per-fold
-# metrics for std dev, so we run manual K-fold for F1 reporting.
 
 from pyspark.ml.tuning import CrossValidator
 
@@ -488,9 +559,10 @@ all_models_config = {
     "LogisticRegression": (lr, lr_grid),
     "LinearSVC":          (svc, svc_grid),
     "RandomForest":       (rf, rf_grid),
+    "NaiveBayes":         (nb, nb_grid),
 }
 
-cv_fold_results = {}  # model -> list of per-fold F1s
+cv_fold_results = {}
 
 for name, (estimator, grid) in all_models_config.items():
     print(f"\n{'='*60}")
@@ -504,7 +576,7 @@ for name, (estimator, grid) in all_models_config.items():
         numFolds=NUM_FOLDS,
         parallelism=2,
         seed=42,
-        collectSubModels=True,  # Collect per-fold models
+        collectSubModels=True,
     )
 
     t0 = time.time()
@@ -517,7 +589,7 @@ for name, (estimator, grid) in all_models_config.items():
     # ── Per-fold F1 scores (from subModels) ──
     fold_f1s = []
     fold_aucs = []
-    sub_models = cv_model.subModels  # list of lists: [grid_combo][fold]
+    sub_models = cv_model.subModels
     best_idx = cv_model.avgMetrics.index(best_auc)
 
     for fold_idx in range(NUM_FOLDS):
@@ -618,11 +690,22 @@ for name, res in cv_results.items():
 val_metrics_df = pd.DataFrame(val_metrics)
 print("\n", val_metrics_df.to_string(index=False))
 
-# Save models
+# ── Model Serialization (MLlib native save + load verification) ──
+print("\n=== MODEL SERIALIZATION ===")
+MODEL_CLASS_MAP = {
+    "LogisticRegression": LogisticRegressionModel,
+    "LinearSVC":          LinearSVCModel,
+    "RandomForest":       RandomForestClassificationModel,
+    "NaiveBayes":         NaiveBayesModel,
+}
 for name, res in cv_results.items():
     mllib_path = str(MODELS_DIR / f"{name}_mllib")
     res["best_model"].write().overwrite().save(mllib_path)
-    print(f"  {name} -> {mllib_path}")
+    # Verify round-trip
+    loaded_model = MODEL_CLASS_MAP[name].load(mllib_path)
+    model_size = sum(f.stat().st_size for f in Path(mllib_path).rglob("*") if f.is_file())
+    print(f"  {name}: saved -> {mllib_path} ({model_size/1024:.1f} KB)")
+    print(f"    Loaded & verified: {type(loaded_model).__name__}")
 
 val_metrics_df.to_csv(str(TABLEAU_DIR / "model_comparison.csv"), index=False)
 
@@ -644,6 +727,7 @@ models = {
     "LogisticRegression": LogisticRegressionModel.load(str(MODELS_DIR / "LogisticRegression_mllib")),
     "LinearSVC":          LinearSVCModel.load(str(MODELS_DIR / "LinearSVC_mllib")),
     "RandomForest":       RandomForestClassificationModel.load(str(MODELS_DIR / "RandomForest_mllib")),
+    "NaiveBayes":         NaiveBayesModel.load(str(MODELS_DIR / "NaiveBayes_mllib")),
 }
 
 test_results = []
@@ -673,7 +757,10 @@ print(results_df.to_string(index=False))
 results_df.to_csv(str(TABLEAU_DIR / "test_metrics.csv"), index=False)
 
 # ── Confusion Matrices with TP/FP/FN/TN ──
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+n_models = len(predictions_dict)
+fig, axes = plt.subplots(1, n_models, figsize=(6 * n_models, 5))
+if n_models == 1:
+    axes = [axes]
 cm_data = []
 for ax, (name, preds) in zip(axes, predictions_dict.items()):
     pdf = preds.select("label", "prediction").toPandas()
@@ -721,6 +808,15 @@ importances = rf_model.featureImportances.toArray()
 top_k = 20
 top_indices = np.argsort(importances)[::-1][:top_k]
 
+# Map for the 5 custom text-statistics features (appended after TF-IDF)
+TEXT_STATS_NAMES = {
+    NUM_FEATURES:     "text_length",
+    NUM_FEATURES + 1: "word_count",
+    NUM_FEATURES + 2: "avg_word_length",
+    NUM_FEATURES + 3: "caps_ratio",
+    NUM_FEATURES + 4: "exclamation_count",
+}
+
 # Reverse hash lookup with MurmurHash3
 import mmh3
 import pyarrow.parquet as pq
@@ -757,7 +853,8 @@ fi_df = pd.DataFrame({
     "rank": range(1, top_k + 1),
 })
 fi_df["words"] = fi_df["feature_index"].apply(
-    lambda x: ", ".join(sorted(hash_to_words.get(x, ["--"]))[:3])
+    lambda x: TEXT_STATS_NAMES.get(int(x),
+              ", ".join(sorted(hash_to_words.get(int(x), ["--"]))[:3]))
 )
 fi_df["feature_label"] = fi_df.apply(
     lambda r: r["words"][:30] if r["words"] != "--" else f"hash_{r['feature_index']}", axis=1
@@ -769,7 +866,7 @@ print(fi_df[["rank", "importance", "words"]].to_string(index=False))
 fig_fi, ax_fi = plt.subplots(figsize=(10, 8))
 sns.barplot(data=fi_df, x="importance", y="feature_label", hue="feature_label",
             ax=ax_fi, palette="viridis", legend=False)
-ax_fi.set_title("Top 20 Predictive Words (Random Forest Feature Importance)")
+ax_fi.set_title("Top 20 Predictive Features (Random Forest Feature Importance)")
 ax_fi.set_xlabel("Gini Importance"); ax_fi.set_ylabel("")
 plt.tight_layout()
 plt.savefig(str(TABLEAU_DIR / "feature_importance.png"), dpi=150, bbox_inches="tight")
@@ -777,14 +874,112 @@ fi_df.to_csv(str(TABLEAU_DIR / "feature_importance.csv"), index=False)
 fi_df.to_csv(str(TABLEAU_DIR / "feature_importance_with_words.csv"), index=False)
 print("Saved feature_importance.png + CSVs")
 
-test_df.unpersist()
-print(f"\nNB4 done ({time.time()-t_nb4:.1f}s)")
-
 # =====================================================================
-#  SCIKIT-LEARN BASELINE COMPARISON
+#  STATISTICAL SIGNIFICANCE TESTING (Bootstrap CI + McNemar)
 # =====================================================================
 print("\n" + "=" * 70)
-print("  SCIKIT-LEARN BASELINE COMPARISON")
+print("  STATISTICAL SIGNIFICANCE TESTING")
+print("=" * 70)
+
+# Collect all predictions to pandas once (efficient)
+pred_pandas = {}
+for name, preds in predictions_dict.items():
+    pred_pandas[name] = preds.select("label", "prediction").toPandas()
+
+# ── 1. Bootstrap Confidence Intervals (95%) ──
+print("\n=== BOOTSTRAP 95% CONFIDENCE INTERVALS (n=1000) ===")
+N_BOOTSTRAP = 1000
+np.random.seed(42)
+bootstrap_results = []
+
+for name, pdf in pred_pandas.items():
+    y_true = pdf["label"].values
+    y_pred = pdf["prediction"].values
+    n = len(y_true)
+
+    boot_f1s  = []
+    boot_accs = []
+    for _ in range(N_BOOTSTRAP):
+        indices = np.random.choice(n, n, replace=True)
+        boot_f1s.append(f1_score(y_true[indices], y_pred[indices]))
+        boot_accs.append(accuracy_score(y_true[indices], y_pred[indices]))
+
+    ci_f1_lo, ci_f1_hi   = np.percentile(boot_f1s, [2.5, 97.5])
+    ci_acc_lo, ci_acc_hi = np.percentile(boot_accs, [2.5, 97.5])
+
+    bootstrap_results.append({
+        "model": name,
+        "f1_mean": round(np.mean(boot_f1s), 4),
+        "f1_ci_lower": round(ci_f1_lo, 4),
+        "f1_ci_upper": round(ci_f1_hi, 4),
+        "acc_mean": round(np.mean(boot_accs), 4),
+        "acc_ci_lower": round(ci_acc_lo, 4),
+        "acc_ci_upper": round(ci_acc_hi, 4),
+    })
+    print(f"  {name:25s}  F1={np.mean(boot_f1s):.4f} [{ci_f1_lo:.4f}, {ci_f1_hi:.4f}]"
+          f"  Acc={np.mean(boot_accs):.4f} [{ci_acc_lo:.4f}, {ci_acc_hi:.4f}]")
+
+boot_df = pd.DataFrame(bootstrap_results)
+boot_df.to_csv(str(TABLEAU_DIR / "bootstrap_confidence_intervals.csv"), index=False)
+print("Exported bootstrap_confidence_intervals.csv")
+
+# ── Bootstrap CI bar chart ──
+fig_ci, ax_ci = plt.subplots(figsize=(10, 6))
+x_pos = np.arange(len(boot_df))
+ax_ci.barh(x_pos, boot_df["f1_mean"],
+           xerr=[boot_df["f1_mean"] - boot_df["f1_ci_lower"],
+                 boot_df["f1_ci_upper"] - boot_df["f1_mean"]],
+           capsize=5, color="steelblue", alpha=0.8)
+ax_ci.set_yticks(x_pos)
+ax_ci.set_yticklabels(boot_df["model"])
+ax_ci.set_xlabel("F1 Score")
+ax_ci.set_title("Bootstrap 95% Confidence Intervals — F1 (n=1000)")
+ax_ci.grid(axis="x", alpha=0.3)
+plt.tight_layout()
+plt.savefig(str(TABLEAU_DIR / "bootstrap_ci_chart.png"), dpi=150, bbox_inches="tight")
+print("Saved bootstrap_ci_chart.png")
+
+# ── 2. McNemar Test (pairwise model comparison) ──
+print("\n=== McNEMAR TEST (pairwise significance at alpha=0.05) ===")
+model_names = list(pred_pandas.keys())
+mcnemar_results = []
+
+for m1, m2 in combinations(model_names, 2):
+    y_true = pred_pandas[m1]["label"].values
+    y1     = pred_pandas[m1]["prediction"].values
+    y2     = pred_pandas[m2]["prediction"].values
+
+    # McNemar contingency
+    b = int(np.sum((y1 == y_true) & (y2 != y_true)))  # model1 correct, model2 wrong
+    c = int(np.sum((y1 != y_true) & (y2 == y_true)))  # model1 wrong, model2 correct
+
+    if b + c == 0:
+        chi2_stat, p_value = 0.0, 1.0
+    else:
+        chi2_stat = (abs(b - c) - 1) ** 2 / (b + c)  # continuity correction
+        p_value   = 1 - scipy_stats.chi2.cdf(chi2_stat, df=1)
+
+    sig = "YES" if p_value < 0.05 else "no"
+    mcnemar_results.append({
+        "model_1": m1, "model_2": m2,
+        "b_correct1_wrong2": b, "c_wrong1_correct2": c,
+        "chi2": round(chi2_stat, 4), "p_value": round(p_value, 6),
+        "significant_005": p_value < 0.05,
+    })
+    print(f"  {m1:25s} vs {m2:25s}  chi2={chi2_stat:8.4f}  p={p_value:.6f}  sig={sig}")
+
+mcnemar_df = pd.DataFrame(mcnemar_results)
+mcnemar_df.to_csv(str(TABLEAU_DIR / "mcnemar_tests.csv"), index=False)
+print("Exported mcnemar_tests.csv")
+
+test_df.unpersist()
+print(f"\nNB4 + Statistical Testing done ({time.time()-t_nb4:.1f}s)")
+
+# =====================================================================
+#  SCIKIT-LEARN BASELINE COMPARISON (4 models)
+# =====================================================================
+print("\n" + "=" * 70)
+print("  SCIKIT-LEARN BASELINE COMPARISON (4 models)")
 print("=" * 70)
 t_sk = time.time()
 
@@ -792,26 +987,19 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression as SklearnLR
 from sklearn.svm import LinearSVC as SklearnSVC
 from sklearn.ensemble import RandomForestClassifier as SklearnRF
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.naive_bayes import MultinomialNB as SklearnNB
 
-# Load data as pandas
-train_pdf = spark.read.parquet(str(FEATURES / "train")).select("label").toPandas()
-test_pdf  = spark.read.parquet(str(FEATURES / "test")).select("label").toPandas()
-
-# Need raw text for sklearn — reload from parquet
+# Load raw text for sklearn
 all_articles = pq.read_table(str(DATA_PARQUET / "news_articles"), columns=["text", "label"])
 all_pdf = all_articles.to_pandas()
 
-# Simple 70/30 split matching our train/test sizes
 from sklearn.model_selection import train_test_split
 X_train_sk, X_test_sk, y_train_sk, y_test_sk = train_test_split(
     all_pdf["text"].values, all_pdf["label"].values,
     test_size=0.3, random_state=42, stratify=all_pdf["label"].values
 )
-
 print(f"sklearn Train: {len(X_train_sk):,}  |  sklearn Test: {len(X_test_sk):,}")
 
-# TF-IDF vectorization (single-node equivalent of our Spark pipeline)
 t0_vec = time.time()
 tfidf = TfidfVectorizer(max_features=NUM_FEATURES, stop_words="english", min_df=5)
 X_train_tfidf = tfidf.fit_transform(X_train_sk)
@@ -824,6 +1012,7 @@ sklearn_models = {
     "sklearn_LR":  SklearnLR(max_iter=100, C=10.0, solver="lbfgs", random_state=42),
     "sklearn_SVC": SklearnSVC(max_iter=100, C=10.0, random_state=42),
     "sklearn_RF":  SklearnRF(n_estimators=50, max_depth=8, random_state=42, n_jobs=-1),
+    "sklearn_NB":  SklearnNB(alpha=1.0),
 }
 
 for sk_name, sk_model in sklearn_models.items():
@@ -847,11 +1036,22 @@ for sk_name, sk_model in sklearn_models.items():
 sklearn_df = pd.DataFrame(sklearn_results)
 sklearn_df.to_csv(str(TABLEAU_DIR / "sklearn_baseline.csv"), index=False)
 
+# ── Pickle sklearn models (serialization) ──
+print("\n=== SKLEARN MODEL SERIALIZATION (Pickle) ===")
+for sk_name, sk_model in sklearn_models.items():
+    pkl_path = str(MODELS_DIR / f"{sk_name}.pkl")
+    with open(pkl_path, "wb") as fh:
+        pickle.dump(sk_model, fh)
+    with open(pkl_path, "rb") as fh:
+        loaded_sk = pickle.load(fh)
+    pkl_size = Path(pkl_path).stat().st_size / 1024
+    print(f"  {sk_name}: {pkl_path} ({pkl_size:.1f} KB)  Verified: {type(loaded_sk).__name__}")
+
 # ── Comparison Table: Distributed vs Single-Node ──
 print("\n=== DISTRIBUTED (Spark MLlib) vs SINGLE-NODE (scikit-learn) ===")
 comparison_rows = []
-spark_names = ["LogisticRegression", "LinearSVC", "RandomForest"]
-sk_names    = ["sklearn_LR", "sklearn_SVC", "sklearn_RF"]
+spark_names = ["LogisticRegression", "LinearSVC", "RandomForest", "NaiveBayes"]
+sk_names    = ["sklearn_LR", "sklearn_SVC", "sklearn_RF", "sklearn_NB"]
 for sp_name, sk_name in zip(spark_names, sk_names):
     sp_row = results_df[results_df["model"] == sp_name].iloc[0]
     sk_row = sklearn_df[sklearn_df["model"] == sk_name].iloc[0]
@@ -905,10 +1105,9 @@ print("\n--- Strong Scaling (parallelism) ---")
 strong_scaling = []
 full_train = spark.read.parquet(str(FEATURES / "train"))
 full_train.persist(StorageLevel.MEMORY_AND_DISK)
-full_train.count()  # materialize cache
+full_train.count()
 
 for n_cores in [1, 2, 4]:
-    # Repartition data to match core count for fair comparison
     repartitioned = full_train.repartition(n_cores)
     repartitioned.persist(StorageLevel.MEMORY_AND_DISK)
     repartitioned.count()
@@ -939,7 +1138,6 @@ pd.DataFrame(scaling_combined).to_csv(str(TABLEAU_DIR / "scaling_experiments.csv
 # ── Scaling Plots ──
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
-# Weak scaling
 ax1.plot(weak_df["num_rows"], weak_df["train_time_s"], "o-", linewidth=2, markersize=8, color="steelblue")
 ax1.set_xlabel("Number of Training Rows", fontsize=11)
 ax1.set_ylabel("Training Time (s)", fontsize=11)
@@ -949,7 +1147,6 @@ for _, r in weak_df.iterrows():
     ax1.annotate(f"{r['train_time_s']:.1f}s", (r["num_rows"], r["train_time_s"]),
                  textcoords="offset points", xytext=(0, 10), ha="center", fontsize=9)
 
-# Strong scaling
 ax2.plot(strong_df["num_cores"], strong_df["train_time_s"], "s-", linewidth=2, markersize=8, color="coral")
 ax2.set_xlabel("Number of Cores (Partitions)", fontsize=11)
 ax2.set_ylabel("Training Time (s)", fontsize=11)

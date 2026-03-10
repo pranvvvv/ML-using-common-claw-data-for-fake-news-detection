@@ -1,4 +1,5 @@
 model,accuracy,f1,precision,recall,auc
-LogisticRegression,0.9437,0.9437,0.9438,0.9437,0.9492
-LinearSVC,0.9348,0.9348,0.9348,0.9348,0.9498
-RandomForest,0.9301,0.9301,0.9304,0.9301,0.9492
+LogisticRegression,0.94,0.9422,0.9442,0.9403,0.9471
+LinearSVC,0.9409,0.9431,0.9456,0.9406,0.9503
+RandomForest,0.9274,0.931,0.9208,0.9415,0.9441
+NaiveBayes,0.93,0.9326,0.9343,0.931,0.9464

@@ -1,7 +1,5 @@
 # Scalable Fake News Detection Using Distributed Machine Learning on Common Crawl Data
 
-**Module:** 7006SCN — Machine Learning and Big Data (Coventry University)  
-**Academic Year:** 2024–25  
 
 ---
 
